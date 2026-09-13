@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Hearth</title>
+<!--
+  HEARTH, FULL SCREEN, WITHOUT THE BANNER.
+
+  Every Apps Script web app is served with a blue "This application was created
+  by a Google Apps Script user" bar across the top. There is no setting for it.
+  Google suppresses it when the app is FRAMED -- which is why it vanished
+  inside Google Sites. The banner never needed Sites. It needed an iframe.
+
+  WHY THIS PAGE IS HOSTED AND NOT A FILE ON THE DESKTOP. Measured 12 Sep 2026,
+  at the cost of an evening. The same markup opened from file:// gives a Google
+  Drive page reading "Sorry, unable to open the file at this time". A file://
+  document has the opaque origin `null`: the browser sends no Referer and
+  treats its storage as untrusted, so Google's /exec redirect cannot complete
+  and it answers as though nobody is signed in. It says so in Drive's voice
+  because an Apps Script project is a Drive file, which is why the error never
+  mentions sign-in and sends you hunting for a broken link.
+
+  Two things it is NOT, both checked rather than assumed:
+    - not third-party cookies. Edge's setting was at its default, allowing
+      them.
+    - not the Google account. script.google.com/u/8/macros/s/.../exec is a
+      hard 404; the /u/N/ prefix works on the editor and on Drive and not on
+      /exec.
+
+  A private window is not the answer either. It appears to work only because
+  you sign in there fresh, and the price is signing in every single time.
+
+  WHAT IS NOT IN THIS FILE, deliberately: the address. Hearth's URLs live in
+  the Drive file "Hearth config" and nowhere else. You paste it once and it is
+  kept in that browser's localStorage, on that device, and never leaves it.
+  That is what lets this page be public while the app behind it is not -- the
+  app is deployed "execute as me, access only myself", so anyone else opening
+  this gets a sign-in wall and nothing more.
+-->
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; background: #F4EFE6; }
+  @media (prefers-color-scheme: dark) { html, body { background: #171513; } }
+  iframe { display: block; width: 100%; height: 100%; border: 0; }
+
+  .ask {
+    box-sizing: border-box; max-width: 34rem; margin: 10vh auto; padding: 1.6rem;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    color: #463F37; background: #FFFDF9; border: 1px solid #DED5C6;
+    border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(34,31,26,.06), 0 10px 30px -18px rgba(34,31,26,.3);
+  }
+  @media (prefers-color-scheme: dark) {
+    .ask { color: #CFC6BA; background: #201D1A; border-color: #3A342D; }
+  }
+  .ask h1 { margin: 0 0 .3rem; font-size: 1.35rem; color: #221F1A; }
+  @media (prefers-color-scheme: dark) { .ask h1 { color: #F2ECE3; } }
+  .ask p { margin: 0 0 1rem; color: #6E665B; font-size: .92rem; }
+  .ask input {
+    box-sizing: border-box; width: 100%; padding: .6rem .7rem; font: inherit;
+    font-size: .9rem; border: 1px solid #DED5C6; border-radius: 9px;
+    background: transparent; color: inherit;
+  }
+  .who { display: flex; gap: .5rem; margin-top: .7rem; }
+  .who button {
+    flex: 1; padding: .5rem; font: inherit; font-size: .88rem; cursor: pointer;
+    color: inherit; background: transparent;
+    border: 1px solid #DED5C6; border-radius: 9px;
+  }
+  .who button[aria-pressed="true"] {
+    background: #9C6414; border-color: #9C6414; color: #fff; font-weight: 600;
+  }
+  .ask .go {
+    margin-top: .9rem; padding: .55rem 1.1rem; font: inherit; font-weight: 600;
+    color: #fff; background: #9C6414; border: 0; border-radius: 9px; cursor: pointer;
+  }
+  .ask code { font-size: .84em; background: #EBE4D8; padding: .1rem .3rem; border-radius: 4px; }
+  @media (prefers-color-scheme: dark) { .ask code { background: #2A2620; } }
+
+  .bar {
+    position: fixed; right: 0; bottom: 0; z-index: 2;
+    display: flex; gap: .9rem; align-items: center; padding: 4px 8px;
+    font: 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .bar a, .bar button {
+    color: #6E665B; background: transparent; border: 0; padding: 0;
+    font: inherit; cursor: pointer; opacity: .4; text-decoration: none;
+  }
+  .bar a:hover, .bar button:hover { opacity: 1; text-decoration: underline; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  var KEY = "hearth-exec-url";
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+
+  /**
+   * SELF-HEALING. An earlier build offered to put /u/N/ after the hostname to
+   * pick a Google account. That form is a hard 404 on /exec, so anyone who
+   * used it has a broken address saved in their browser and would keep seeing
+   * the same failure with nothing to click. Strip it on read rather than
+   * making them find the reset.
+   */
+  function clean(u) {
+    return String(u || "")
+      .replace(/^(https:\/\/script\.google\.com)\/u\/\d+\//, "$1/");
+  }
+
+  function withWho(u, who) {
+    u = u.replace(/([?&])who=[^&]*/i, "$1").replace(/[?&]$/, "");
+    if (!who) return u;
+    return u + (u.indexOf("?") === -1 ? "?" : "&") + "who=" + encodeURIComponent(who);
+  }
+
+  function open(u) {
+    document.body.innerHTML =
+      '<iframe src="' + u.replace(/"/g, "&quot;") + '" ' +
+      'allow="clipboard-write" title="Hearth"></iframe>' +
+      '<div class="bar">' +
+        // The escape hatch, always visible. When a frame is refused there is
+        // nothing to read inside it, so the way out has to live outside it.
+        '<a href="' + u.replace(/"/g, "&quot;") + '" target="_blank" ' +
+        'rel="noopener">open in a tab</a>' +
+        "<button>change link</button></div>";
+    document.querySelector(".bar button").onclick = function () {
+      try { localStorage.removeItem(KEY); } catch (e) {}
+      location.reload();
+    };
+  }
+
+  function ask() {
+    document.body.innerHTML =
+      '<div class="ask"><h1>Hearth</h1>' +
+      "<p>Paste the app's address once — the <code>…/exec</code> link " +
+      "from the Drive file <b>Hearth config</b>. It is kept in this browser, " +
+      "on this device, and goes nowhere else.</p>" +
+      '<input id="u" type="url" spellcheck="false" ' +
+      'placeholder="https://script.google.com/macros/s/…/exec">' +
+      '<div class="who">' +
+        '<button data-who="Jeff" aria-pressed="false">I\'m Jeff</button>' +
+        '<button data-who="Amy" aria-pressed="false">I\'m Amy</button>' +
+      "</div>" +
+      '<button class="go">Open</button>' +
+      '<p style="margin:.9rem 0 0">Saying who you are adds ' +
+      "<code>?who=</code> to the address, so the ledger records who is " +
+      "looking. Skip it if you would rather it did not.</p></div>";
+
+    var box = document.getElementById("u");
+    var who = "";
+    [].forEach.call(document.querySelectorAll(".who button"), function (b) {
+      b.onclick = function () {
+        who = (who === b.getAttribute("data-who")) ? "" : b.getAttribute("data-who");
+        [].forEach.call(document.querySelectorAll(".who button"), function (o) {
+          o.setAttribute("aria-pressed",
+            o.getAttribute("data-who") === who ? "true" : "false");
+        });
+      };
+    });
+
+    function go() {
+      var v = clean((box.value || "").trim());
+      // Anything but an Apps Script exec URL is a mistake worth catching here
+      // rather than as a blank frame with no explanation.
+      if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(v)) {
+        box.style.borderColor = "#A2452A";
+        box.focus();
+        return;
+      }
+      v = withWho(v, who);
+      try { localStorage.setItem(KEY, v); } catch (e) {}
+      open(v);
+    }
+    document.querySelector(".go").onclick = go;
+    box.onkeydown = function (e) { if (e.key === "Enter") go(); };
+    box.focus();
+  }
+
+  if (stored) {
+    var fixed = clean(stored);
+    if (fixed !== stored) { try { localStorage.setItem(KEY, fixed); } catch (e) {} }
+    open(fixed);
+  } else {
+    ask();
+  }
+})();
+</script>
+</body>
+</html>
