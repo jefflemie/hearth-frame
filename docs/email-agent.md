@@ -265,20 +265,26 @@ Free, immediate, and the first thing to do.
 
 ### What that compounds to
 
-Illustrative arithmetic, not measurement -- the overhead figure is the
-one to replace with your own first:
+**Measured, 21 Sep 2026: ~201 threads in seven days -- about 30 a day,
+~40 messages.** The earlier drafts assumed 200/day and were wrong by
+roughly sevenfold. This is a well-kept mailbox, not a firehose: the
+inbox holds 125 threads in total.
+
+That changes the conclusion from *tight* to *comfortable*:
 
 | | tokens/day |
 |---|---|
-| Naive: one invocation per email, harness loaded | ~840,000 |
-| `--bare`, no tools, schema output | ~500,000 |
-| ...batched 20 per invocation | ~270,000 |
-| ...plus distillation, ~15% escalation rate | **~42,000** |
+| Naive: one invocation per message, harness loaded | ~170,000 |
+| `--bare`, no tools, schema output | ~100,000 |
+| ...batched | ~55,000 |
+| ...plus archetypes and distillation | **~8,000** |
 
-Assumes 200 mail/day, ~1.2k tokens of extracted text each, ~3k fixed
-overhead per `--bare` invocation. **Roughly twenty-fold**, and the last
-line is the one that decides whether this is comfortable or constantly
-against the ceiling.
+In steady state that is **two or three `claude -p` invocations a day** --
+one or two batches of escalations plus the nightly sweep. Against a Pro
+quota that is not a constraint worth fearing. The efficiency work is
+still what buys the headroom; it just buys considerably more of it than
+the first draft projected, and leaves the reserve for your own
+interactive use genuinely large.
 
 ### The budget governor
 
@@ -421,6 +427,97 @@ nothing for a real person writing to you, who has no archetype and needs
 no extractor -- that mail goes to layer 3's classifier and to Claude.
 Getting the machine half genuinely free is what makes the human half
 affordable.
+
+---
+
+## What the real mailbox says
+
+Surveyed 21 Sep 2026 against the live account. Four findings, two of
+which overturn assumptions above. **Specifics -- institutions, balances,
+card digits, family detail -- are deliberately not recorded here; see
+the note at the end of this section.**
+
+### 1. The taxonomy already exists, and it is already applied
+
+The mailbox carries a hand-built label tree -- a bulk bucket, a notices
+bucket, a review bucket, a needs-reply bucket, and a money subtree split
+into alerts, transactions, actions, checks and other -- applied across
+roughly **240 messages**, alongside a dozen topical labels for people,
+house, receipts, tax and therapy.
+
+This was listed as an open question ("what categories is the student
+learning?"). It is answered. Layer 3's Phase 1 no longer needs a weekend
+of quota to bootstrap labels from nothing.
+
+**But do not simply ingest them.** Spot-checking shows real
+inconsistency: two near-identical card alerts from the same issuer
+carry different labels, one carries none at all, and a rewards offer is
+filed under transactions. The existing tree is a **strong prior and a
+statement of intent, not ground truth.** Phase 1 becomes *Claude audits
+and repairs the existing labels* -- far cheaper than labelling from
+scratch, and it produces a cleaner training set than either the human or
+the model would alone.
+
+### 2. Statements are often not PDFs at all
+
+Layer 2 assumed statement data lives in an attachment. For the
+highest-volume card issuer here it does not: the "statement available"
+email carries **account, due date, minimum payment and statement
+balance as text in the body**. No attachment, no pdfplumber, no Docling,
+no OCR.
+
+This is the cheapest possible path and it was hiding in plain sight.
+**Check the body before reaching for the attachment** -- for some
+archetypes the PDF is redundant, and the tier-0 extractor is a handful
+of regexes over plain text. The document pipeline is for fewer messages
+than the previous draft assumed.
+
+### 3. The archetype argument, confirmed in the wild
+
+One issuer's alerts sit under two sender addresses spanning at least
+five archetypes -- transaction alert, payment received, statement ready,
+credit-limit change, annual privacy notice -- plus a separate marketing
+address. Another issuer splits statements and marketing across
+*different subdomains*, with six distinct archetypes sharing the single
+marketing address.
+
+And the two largest issuers demand **opposite extraction strategies**:
+
+- One puts **merchant and amount in the subject line** -- the body is
+  nearly empty. Extraction is a subject-line regex.
+- The other sends an **identical subject for every alert**, with
+  merchant, amount and card in the body. The subject is worthless as a
+  key; only the body carries signal.
+
+Two banks, two archetypes with the same *meaning* and no shared
+extraction logic whatsoever. Sender-keyed rules would have produced one
+extractor for each and got both wrong.
+
+### 4. It is a shared household mailbox
+
+Mail arrives for two people -- medical, marketing and event mail
+addressed to one, card and retirement mail to the other -- in one
+account. **Every archetype needs a `who`**, which is the same dimension
+Hearth already models in its `?who=` parameter. Routing, priority and
+whether something even reaches a digest all depend on it.
+
+### 5. Hearth already emails itself a daily digest
+
+A dated summary arrives each morning carrying the pay period, overdue
+bills with ages, amounts and accounts. **The output channel already
+exists**, and Hearth already knows what it is owed. This reframes the
+open question about the write path: the agent may not need to write to
+Hearth so much as to feed the thing that already produces that digest.
+
+### On what is not written down here
+
+The survey saw account balances, card digits, a home address and phone
+number, employer, medical providers and family names. **None of it is in
+this repository**, in keeping with the precedent `index.html` already
+sets: the design notes record shapes and never values. The concrete
+inventory -- which institutions, which archetypes, which fields -- lives
+outside git until you say otherwise. If this repository is private, or
+you would rather it were in, say so and it goes in.
 
 ---
 
@@ -768,11 +865,10 @@ same design against any mailbox.
 3. **Volume and accounts.** Every number in layer 1 is arithmetic over an
    assumed 200/day across one mailbox. Real volume, and whether this is
    one Gmail account or several, changes the escalation budget directly.
-4. **The archetype inventory.** The next thing to build, and now the
-   critical path. It cannot be written from a chair -- it needs a pass
-   over real mail to see how many archetypes the heavy senders actually
-   have, how stable their skeletons are, and how often they drift.
-   Everything in layers 2 and 3 is sized off those numbers.
+4. **The archetype inventory.** Begun -- see the survey above -- and
+   still the critical path. The heavy senders are identified and their
+   archetypes sketched; what remains is skeleton-hashing a few months of
+   history to measure how stable each one is and how often it drifts.
 5. **The action vocabulary.** Given an archetype, what may the agent
    *do*? The table in the archetype section sketches it for Citi --
    ledger row, reconcile, file, escalate -- but the real list, and which
