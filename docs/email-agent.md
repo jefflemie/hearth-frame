@@ -1,10 +1,15 @@
 # The email agent: availability foundation
 
-Layer 0 (the machine), layer 1 (keeping Claude answering) and layer 2
-(turning documents into as few tokens as possible). The classifier's
-taxonomy, the Hearth write path and the reply policy are deliberately
-not here yet -- they are worthless on a box that goes dark on a Tuesday
-because something auto-updated.
+Layer 0 (the machine), layer 1 (making a fixed Claude quota last),
+layer 2 (turning documents into as few tokens as possible) and layer 3
+(teaching a local model to do the routine reading). The Hearth write
+path and the reply policy are deliberately not here yet -- they are
+worthless on a box that goes dark on a Tuesday because something
+auto-updated.
+
+**Two constraints are settled and everything here obeys them: the
+Claude Pro subscription is the only paid component, and every other
+tool is free, open source and runs locally.**
 
 Written in the same spirit as `index.html`: what was measured, what was
 assumed, and what is still unverified, kept apart from each other.
@@ -18,8 +23,11 @@ indifferent to Claude being unavailable.**
 
 Claude is a network service someone else operates. It will rate-limit,
 it will 529, it will have a bad twenty minutes. No amount of care on
-the T440 changes that. So availability cannot mean "the model always
-answers." It has to mean:
+the T440 changes that. And on a **fixed subscription quota** it is
+stronger than that: the model will be unavailable *because you used it*,
+predictably, every week, and the only control you have is how fast you
+spend. So availability cannot mean "the model always answers." It has to
+mean:
 
 > No email is ever lost, no email is ever acted on twice, and every
 > email is eventually read -- however long the model was away.
@@ -135,8 +143,12 @@ database, and the queue is the part you cannot recreate.
 
 ### Getting in, from anywhere, forever
 
-**Tailscale.** Not port-forwarding, not dynamic DNS. It survives IP
-changes, ISP swaps, and NAT, and it gets you in when the thing is sick.
+**Tailscale, on a Headscale control server.** Not port-forwarding, not
+dynamic DNS. It survives IP changes, ISP swaps, and NAT, and it gets you
+in when the thing is sick. The clients are BSD-3 but Tailscale's
+coordination server is proprietary and hosted -- see the stack section;
+**Headscale** is the self-hosted replacement that keeps remote access
+inside the FOSS constraint.
 Enable Tailscale SSH so there is no public sshd at all, and set the node
 as an exit-node-less always-on service unit.
 
@@ -154,124 +166,107 @@ is a boot-time error rather than a device.
 
 ---
 
-## Layer 1 -- keeping the reading going
+## Layer 1 -- Pro only: tokens are uptime
 
-### The uncomfortable part: a Pro subscription is the wrong engine
+**Decided: the Claude Pro subscription is the engine. No API.** Every
+other tool in the stack is free and open source, and runs locally.
 
-The plan as stated is a Claude Pro account living on the box, doing the
-reading. Two properties of Pro make it the *least* available option
-available to you:
+That settles the question and changes what efficiency *is*. On the API,
+a wasted token costs a fraction of a cent. On a subscription it costs
+**availability** -- the quota is fixed, pooled across claude.ai, Desktop
+and Claude Code, refilled on rolling five-hour windows under a weekly
+cap, with no `retry-after` to respect and nothing to buy in the moment.
 
-1. **Usage is pooled across every surface.** claude.ai, Claude Desktop
-   and Claude Code all draw on the same limit. Your own interactive
-   Claude use and the mailbox compete for one budget. A heavy afternoon
-   in a chat window is silently deducted from the agent's evening.
-2. **There is a weekly cap, on top of the rolling five-hour windows.**
-   A heavy Monday and Tuesday can leave the mailbox unread on Thursday.
-   There is no retry-after to respect, no burst credit to buy, nothing
-   to do but wait for the reset.
+So the arithmetic inverts:
 
-Subscription limits are designed around a human at a keyboard who stops
-for lunch. A process that wakes for every inbound message is not that
-shape. You would be building a high-availability machine around a
-component with a weekly lockout.
+> Every token spent classifying a newsletter on Monday is a token not
+> available for a mortgage letter on Thursday.
 
-**The API does not have this problem.** Rate limits are per-minute,
-per-org, they return `429` with `retry-after`, and a backoff loop
-absorbs them in seconds rather than days.
+Efficiency is no longer frugality. It is the availability mechanism.
+Everything in this layer exists to make the quota last.
 
-So, the split I'd actually build:
+**And the quota is not the agent's alone.** It is the same pool you draw
+on when you sit down to work. An agent that reads mail enthusiastically
+all morning can lock *you* out of your own Claude by lunchtime. A
+reserve is not a nicety here; it is the difference between a useful
+assistant and a hostile roommate.
 
-> **The API is the engine. The Pro subscription is your console.**
+### Three mechanisms, in order of leverage
 
-The always-on reader runs on the Anthropic API with a key of its own and
-a budget of its own. The Pro account still lives on the T440 -- it is
-what *you* SSH into to interrogate the agent, dig through the queue,
-and change its rules by talking to it. That is exactly the shape Pro is
-good at, and it can no longer take the mailbox down with it.
+**1. Distillation -- Claude teaches, a local model does the routine work.**
+The whole of layer 3 below. Largest by a wide margin.
 
-### What it costs, so the tradeoff is a number
+**2. Batching -- amortise the per-invocation overhead.**
+Every `claude -p` invocation pays a fixed cost before it sees a single
+word of email: system prompt, tool definitions, whatever context the
+harness loads. Paying that 200 times a day is the single most
+Pro-specific waste available to you. Batch twenty emails into one
+invocation and the overhead is divided by twenty.
 
-At **200 inbound/day**, with the pipeline below (deterministic prefilter,
-Haiku 4.5 triage, escalation to Opus 5 only where judgment is needed,
-stable prompt prefix cached):
+**3. Invocation hygiene -- strip the harness to the bone.**
+Free, immediate, and the first thing to do.
 
-| | per email | per day | per month |
-|---|---|---|---|
-| Haiku 4.5 triage (~120/day reach it) | ~$0.0025 | ~$0.30 | **~$9** |
-| Opus 5 escalation (~12/day) | ~$0.06 | ~$0.72 | **~$22** |
-| | | | **~$30/mo** |
+- **`--bare` on every call.** It skips auto-discovery of hooks, skills,
+  custom commands, subagents, plugins, MCP servers, auto memory and
+  `CLAUDE.md`. Each of those is tokens on every invocation, and a
+  classification call needs none of them. It is documented as the
+  recommended mode for scripted calls and is slated to become the
+  default for `-p`.
+- **No tools.** Tool definitions are tokens. Pass no `--allowedTools`
+  for a call that only has to return a judgement. The worker does the
+  I/O; Claude does the thinking.
+- **A JSON schema, not prose.** `--output-format json` with a schema
+  puts the answer in `structured_output` and constrains generation to
+  it. No preamble, no explanation, no "Here's my analysis:" -- every
+  output token is a field you asked for.
+- **A fresh session per batch.** Never `--continue`. Accumulated context
+  is the silent quota killer: it grows monotonically and you pay for all
+  of it on every turn.
 
-Published rates: Haiku 4.5 $1/$5 per MTok, Opus 5 $5/$25 per MTok.
-Assumes a cached prompt prefix reading at roughly a tenth of input
-price, ~1.2k tokens of extracted text per mail, ~200 tokens of JSON out.
-Re-baseline it against your real volume before trusting it.
+### What that compounds to
 
-Roughly a Pro subscription's worth of money, for something that cannot
-be locked out. And the Batch API halves the cost of anything not
-latency-sensitive -- the nightly digest and any re-read pass should go
-through it.
+Illustrative arithmetic, not measurement -- the overhead figure is the
+one to replace with your own first:
 
-### Efficiency: where the wins actually are
+| | tokens/day |
+|---|---|
+| Naive: one invocation per email, harness loaded | ~840,000 |
+| `--bare`, no tools, schema output | ~500,000 |
+| ...batched 20 per invocation | ~270,000 |
+| ...plus distillation, ~15% escalation rate | **~42,000** |
 
-"Super efficient" and "actually reads every email" are not in tension,
-but only if you are precise about what reading means.
+Assumes 200 mail/day, ~1.2k tokens of extracted text each, ~3k fixed
+overhead per `--bare` invocation. **Roughly twenty-fold**, and the last
+line is the one that decides whether this is comfortable or constantly
+against the ceiling.
 
-**The prefilter routes; it never discards.** Nothing is filed, archived
-or dropped without a model having looked at it. What the deterministic
-layer decides is *which* model at *what* effort -- not whether. That
-distinction is the whole promise, and it is the first thing that will
-erode under cost pressure if it isn't written down.
+### The budget governor
 
-The four levers, in order of size:
+A fixed quota with no API to query needs a component that no
+API-based design would have: something that knows what has been spent
+and decides who gets the rest.
 
-1. **Extract before you send.** A marketing HTML email is 50k tokens on
-   the wire and 400 tokens of content. Strip to text, drop quoted reply
-   chains, drop signatures and legal boilerplate, cap attachments.
-   Routinely a 10-50x reduction, and it costs nothing but code.
-2. **Cache the stable prefix.** Taxonomy, household rules, Hearth's
-   schema, the action vocabulary -- all identical on every call. Put
-   them first and mark the breakpoint; only the email varies after it.
-   This is the largest single lever and it is purely a matter of
-   ordering the prompt correctly from day one.
-3. **Micro-batch for cache locality.** The default cache TTL is short.
-   Mail arrives in bursts; processing on a ~2-minute tick instead of
-   per-message means a burst shares one warm cache instead of paying
-   the write each time. A two-minute delay on email is not a delay.
-4. **Two tiers.** Haiku 4.5 decides and handles the obvious. It
-   escalates to Opus 5 when the mail needs real judgment, touches money,
-   or proposes a Hearth write. Most mail never needs the expensive
-   model; the few that do are exactly the ones worth paying for.
+- **Meter every call.** `--output-format json` returns `total_cost_usd`
+  and a per-model breakdown. On Pro that dollar figure is notional --
+  nothing is billed -- but it is a faithful *proportional* signal, which
+  is exactly what a governor needs. Log it on every invocation. This log
+  is your only instrument; Pro offers no usage endpoint to ask.
+- **Track both windows.** Rolling five-hour and weekly. The weekly cap
+  is the one that bites, and it bites on a Thursday.
+- **Hold a reserve for the human.** A fixed slice of the week that the
+  agent may not touch, so your own interactive use is never starved.
+- **Admit by priority, not arrival.** When quota is scarce, a first-time
+  sender with an invoice outranks a newsletter. Arrival order is the
+  wrong order.
+- **Degrade, don't stop.** Near exhaustion, fall back to layer 3's local
+  classifier alone and defer every escalation to the next window. The
+  queue from the top of this document means deferral costs latency and
+  nothing else.
 
-### The queue is the availability story
-
-```
-Gmail  ->  ingest  ->  [ SQLite, WAL ]  ->  worker  ->  effects
-           (cursor)      durable queue      (model)     (idempotent)
-```
-
-- **Ingest** polls `users.history.list` against a stored `historyId`
-  cursor every 30-60s. Incremental, cheap, and it cannot skip: the
-  cursor only advances after the rows are committed. Start with polling;
-  Pub/Sub **pull** subscriptions are the upgrade path when a minute of
-  latency starts to matter, and pull works behind NAT with no inbound
-  port.
-- **The queue is the contract.** Ingest never calls the model. It writes
-  rows and returns. If the model is unavailable for three hours, rows
-  accumulate and drain afterwards. Nothing is lost because nothing
-  depended on the model being up at the moment mail arrived.
-- **Effects are idempotent**, keyed on `(message-id, action-hash)`,
-  written *before* the call and confirmed after. A crash mid-action
-  replays safely; it cannot double-label, double-file, or double-write
-  to Hearth.
-- **Circuit breaker.** On sustained model failure, trip to a degraded
-  mode that still does the safe deterministic things -- label by known
-  sender, file known vendors -- and defers everything requiring
-  judgment. Degraded mode **never sends email and never writes to
-  Hearth.** It only ever makes the pile smaller and better-sorted.
-- **Backlog is the health metric.** Not uptime. "Oldest unprocessed
-  message age" is the number that tells you whether the thing is doing
-  its job, and the only one worth paging on.
+One practical note: sustained automated use of a personal subscription
+is worth a glance at your plan's terms before you scale it up. Claude
+Code on Pro and headless `-p` are both documented and supported; the
+volume is the part only you can size.
 
 ---
 
@@ -406,23 +401,174 @@ extracted text crosses the network.
 
 ---
 
+## Layer 3 -- distillation: Claude as teacher, not labourer
+
+The largest efficiency win is not making Claude's calls cheaper. It is
+**not making most of them.**
+
+Claude is a superb classifier and a ruinously expensive one to run two
+hundred times a day against a fixed quota. But classification is a
+learnable task, and you have a perfect teacher already on the box.
+
+### The loop
+
+**Phase 0 -- deterministic.** Dedupe, known-sender rules,
+`List-Unsubscribe`, and layer 2's learned templates. Free, and it should
+handle the dull majority.
+
+**Phase 1 -- bootstrap.** Claude labels ~300-500 real emails, batched
+twenty at a time behind `--bare`. A deliberate, one-time, budgeted spend
+-- a weekend of quota to buy months of autonomy.
+
+**Phase 2 -- train the student.** Embed each email and fit a classifier.
+On this hardware that is close to free:
+
+- **Model2Vec** (`potion-base-32M`) distills a sentence transformer into
+  static token embeddings: **~50x smaller and up to ~500x faster**, at
+  roughly **93%** of `all-MiniLM-L6-v2`'s quality (~52.1 vs 56.3 MTEB).
+  Distillation itself runs in about **30 seconds on CPU**.
+- Or **`all-MiniLM-L6-v2`** directly -- under 10ms per email on CPU,
+  MTEB 56.3 -- if you want the accuracy and can spare the milliseconds.
+- Then plain **logistic regression** over the embeddings. Not a
+  neural net. Boring, fast, interpretable, and it tells you its
+  confidence, which is the part that matters.
+
+**Note what this avoids.** No local *generative* LLM. Nothing to quantise,
+no tokens/sec to agonise over on a Haswell ULV, no 4GB of weights
+competing with Docling for the 12GB ceiling. Embeddings plus a linear
+model is microseconds per email and tens of megabytes resident. The
+T440 is comfortably the right machine for this, which it would not be
+for a local 7B.
+
+**Phase 3 -- steady state.** The student classifies everything. Only
+low-confidence cases escalate, batched, to Claude.
+
+**Phase 4 -- active learning.** Every escalated answer becomes a new
+training label. Retrain nightly. The escalation rate decays as the
+student learns your mail, so **the system gets cheaper the longer it
+runs** -- the right shape for a fixed quota.
+
+### The confidence threshold is the throttle
+
+This is the control loop the whole design has been building toward. One
+knob connects the quota to the behaviour:
+
+- Quota tight -> **raise** the threshold. Fewer escalations, more local
+  autonomy, slightly more error.
+- Quota plentiful -> **lower** it. More escalations, faster learning,
+  better labels.
+
+The budget governor turns that knob. Nothing else needs to change for
+the system to ride out a heavy week.
+
+### The rule that stops efficiency eating correctness
+
+A logistic regression can be confident and wrong. It has no idea what a
+mortgage is. So confidence governs **triage only**:
+
+> **A hard allowlist of high-stakes categories always escalates to
+> Claude, whatever the student's confidence.** Anything touching money,
+> anything proposing a Hearth write, anything from a first-time sender,
+> anything legal or medical.
+
+The student decides where the boring mail goes. It never decides
+anything that would be expensive to get wrong.
+
+### On "it must actually read every email"
+
+This deserves a straight answer rather than a reassuring one, because
+distillation is in genuine tension with it.
+
+Under this design **every email is read by something** -- embedded,
+classified, never filed unexamined -- but the thing reading most of them
+is a linear model, not Claude. If the requirement means *Claude reads
+every email*, distillation breaks it, and on a Pro quota the requirement
+is simply unaffordable at 200/day.
+
+The version worth committing to:
+
+> Every email is read by something competent, **everything consequential
+> is read by Claude**, and nothing is ever acted on unexamined.
+
+Two things keep that honest. The high-stakes allowlist above, and a
+**nightly sweep**: one batched, cheap invocation in which Claude reviews
+the day's local decisions in summary -- every category assignment, the
+near-threshold calls in full -- and flags what the student got wrong.
+That catches drift, feeds the training set, and costs one invocation a
+day rather than two hundred.
+
+---
+
+## The stack, and what "closed environment" really buys
+
+Everything below is free and open source and runs on the box. Licences
+noted because a couple of them matter.
+
+| Job | Tool | Licence |
+|---|---|---|
+| Host, declarative config | NixOS | MIT |
+| Container runtime | Podman | Apache-2.0 |
+| Queue and all state | SQLite | public domain |
+| Mail parsing | Python `email` stdlib | PSF |
+| Quoted-chain / signature stripping | talon, email-reply-parser | Apache-2.0, MIT |
+| HTML and Office to Markdown | MarkItDown | MIT |
+| Table-faithful documents | Docling | MIT |
+| PDF text layer | pdfplumber / pdfminer.six | MIT |
+| OCR | Tesseract or RapidOCR | Apache-2.0 |
+| Embeddings | Model2Vec / sentence-transformers | MIT / Apache-2.0 |
+| Classifier | scikit-learn | BSD-3 |
+
+**Two traps worth naming now.**
+
+**PyMuPDF is AGPL-3.0.** It is the fastest PDF library and the obvious
+reach, and its licence is viral in a way the rest of this list is not.
+pdfplumber over pdfminer.six is the permissive path. Decide deliberately
+rather than by `pip install`.
+
+**Tailscale's client is BSD-3; its coordination server is not.** Layer 0
+recommends Tailscale, and under the old assumptions that was fine. Under
+"works in a closed environment" it is a hosted proprietary dependency in
+the middle of your remote access. **Headscale** (BSD-3) is the
+self-hosted control server that closes that gap and speaks to the stock
+clients. If remote access must survive a vendor, run Headscale.
+
+**And the honest boundary:** this environment is not closed. Claude is a
+network service and so is Gmail. What the FOSS constraint actually buys
+is that *everything else* is -- documents are parsed on your own
+machine, classification runs locally, the queue and all state are files
+you own, and no third service ever sees a bank statement. Nothing in the
+stack can be discontinued, repriced, or rate-limited out from under you
+except the two you chose deliberately.
+
+Two consequences follow. Model weights (Docling's layout models,
+the embedding model, Tesseract's language data) need one download, after
+which they should be **pinned and vendored** like any other dependency
+-- a closed box cannot fetch them later. And the **Gmail API is the one
+service-shaped dependency in the ingest path**: if provider independence
+ever matters more than convenience, IMAP via `imapclient` (BSD-3) is the
+same design against any mailbox.
+
+---
+
 ## Still open
 
-Not blocking layer 0, but these shape everything after it:
-
-1. **Engine: API or Pro?** The recommendation above is the API for the
-   reader, Pro as your console. It is a real cost decision and it is
-   yours.
-2. **Hearth's write path.** The app is deployed *execute as me, access
+1. **Hearth's write path.** The app is deployed *execute as me, access
    only myself*, so the agent cannot simply POST to `/exec`. The
    cleanest shape is probably an **intake queue** -- the agent appends
    proposed rows, Hearth's own script drains them under its own rules --
    so the ledger keeps a single writer and the agent stays outside the
    trust boundary. Needs Hearth's internals to decide.
-3. **Autonomy.** Assumed for now: **drafts, never sends.** Labels, filing
+2. **Autonomy.** Assumed for now: **drafts, never sends.** Labels, filing
    and Hearth *proposals* are autonomous; anything leaving the house or
    changing the ledger waits for a human. Easy to loosen later, very
    hard to walk back.
-4. **Volume and accounts.** The cost model needs a real number, and
-   whether this is one Gmail account or several changes the ingest
-   design.
+3. **Volume and accounts.** Every number in layer 1 is arithmetic over an
+   assumed 200/day across one mailbox. Real volume, and whether this is
+   one Gmail account or several, changes the escalation budget directly.
+4. **The taxonomy.** What categories the student is learning, and which
+   of them land on the always-escalate allowlist, is the next thing to
+   design -- and it is the thing that decides whether layer 3 works.
+5. **Scanned vs native PDFs.** If recurring senders email real PDFs,
+   templates plus Docling cover nearly everything and OCR never runs. If
+   receipts get photographed, Tesseract gets real traffic on a Haswell
+   ULV and the extraction budget needs redoing.
