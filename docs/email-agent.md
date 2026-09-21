@@ -322,10 +322,10 @@ An earlier draft keyed extractors on `(sender, layout)`. **That is
 wrong, and it is the kind of wrong that looks fine until it is in
 production.**
 
-"Citi" is not a thing. Citi is a per-transaction alert, a statement
+**A card issuer is not a thing.** One issuer is a per-transaction alert, a statement
 notice, a payment confirmation, a credit card offer, a balance transfer
 promotion, a rewards summary and a fraud alert -- seven pipelines
-wearing one From address. Any design that says "the Citi extractor" has
+wearing one From address. Any design naming "the <issuer> extractor" has
 already failed. The same is true of every bank, utility and merchant in
 the mailbox.
 
@@ -346,11 +346,11 @@ one message shape. Discovered, not enumerated.
 
 Strip the variable content -- amounts, dates, names, account digits,
 tracking URLs, anything that changes between sends -- and hash what
-remains: the HTML tag structure and the static boilerplate. Two Citi
-transaction alerts produce an identical skeleton. A Citi statement
-notice produces a different one. Nobody has to know in advance that Citi
-has seven shapes; the clustering finds them, and finds the eighth when
-it appears.
+remains: the HTML tag structure and the static boilerplate. Two of one
+issuer's transaction alerts produce an identical skeleton. Its statement
+notice produces a different one. Nobody has to know in advance that a
+given sender has seven shapes; the clustering finds them, and finds the
+eighth when it appears.
 
 It is hashing and string work. No model, no weights, negligible memory
 -- which matters at 8 GB.
@@ -373,7 +373,7 @@ that fires on an unrecognised message is the failure mode worth fearing
 -- and tier C is what makes that impossible. Nothing falls through to a
 default.
 
-When Citi redesigns its alert, the skeleton changes, tier A misses,
+When an issuer redesigns its alert, the skeleton changes, tier A misses,
 tier C escalates, Claude identifies it and repairs the extractor, and
 the new cluster registers itself. **The system self-heals, and its
 failure mode is an escalation rather than a wrong number.**
@@ -384,7 +384,7 @@ This is why the unit matters so much. It is not that different
 archetypes need different *extractors* -- they need entirely different
 *handling*:
 
-| Citi archetype | volume | extract | Hearth | Claude, once learned |
+| One issuer's archetypes | volume | extract | Hearth | Claude, once learned |
 |---|---|---|---|---|
 | Transaction alert | very high | body fields | ledger row | never |
 | Statement notice | monthly | PDF attachment | reconcile | only on drift |
@@ -402,14 +402,15 @@ itself on a Pro quota.
 
 ### Two guards that fall out of this for free
 
-**Rarity is a signal, not noise.** A fraud alert is the rarest Citi
+**Rarity is a signal, not noise.** A fraud alert is an issuer's rarest
 archetype and the one that matters most. Any system that learns from
 frequency will learn it worst. So: **a rare archetype from a financial
 sender always escalates**, whatever its confidence. "We have only seen
 this twice" must never become "low priority."
 
 **A novel archetype from a known sender is a security event.** A message
-claiming to be Citi whose skeleton matches none of Citi's known
+claiming to be a known issuer whose skeleton matches none of that
+issuer's known
 archetypes is one of two things: a redesign, or a phish wearing the
 brand. The architecture detects this for nothing, and the response is
 the same either way -- check SPF, DKIM and DMARC alignment, escalate to
@@ -693,7 +694,7 @@ action and the priority. Free, and it should account for the large
 majority of arriving volume.
 
 This narrows the student's job considerably, and usefully. It is not
-learning to recognise Citi transaction alerts -- structural clustering
+learning to recognise an issuer's transaction alerts -- structural clustering
 does that exactly, for nothing. It is learning to route **what is
 left**: human mail, unmatched machine mail, and the first few instances
 of an archetype before its cluster is established. A smaller, harder,
@@ -787,6 +788,186 @@ day rather than two hundred.
 
 ---
 
+## Layer 4 -- what the agent actually does
+
+Layers 0-3 decide how the agent reads. This decides what it is allowed
+to do about it.
+
+### The action vocabulary, tiered by reversibility
+
+**Free -- autonomous, always.** Apply a label, file out of the inbox,
+extract fields, register an archetype, enqueue a Hearth *proposal*,
+write to its own queue. All reversible, none visible outside the house.
+
+**Logged -- autonomous, recorded, reversible.** Mark read, move between
+labels, include in the digest. Same character, but written to an audit
+log the nightly sweep reviews.
+
+**Proposed only -- never autonomous.** Send or reply to any email.
+Unsubscribe. Delete or trash. Write canonical Hearth state. Anything
+that commits money. These produce a **draft or a queued proposal** and
+stop.
+
+**Always escalate, whatever the confidence.** Fraud and security
+archetypes. A novel archetype from a known sender. Failed DKIM/DMARC
+alignment. A first-time sender with financial content. Any extraction
+whose validation gate failed.
+
+The governing rule, and the one to re-read whenever a new capability is
+proposed:
+
+> **The agent may always make the pile smaller and better sorted. It may
+> never make a commitment on the household's behalf.**
+
+### The receipt pipeline -- the best automation in this mailbox
+
+The survey found something the design was not looking for. The single
+largest source of attachments is **manual expense-receipt forwarding to
+a work address** -- dozens of them, phone photographs of receipts, sent
+by hand, over months.
+
+Their subjects follow a convention that is not quite a convention:
+roughly `Receipt - <date> - <category> - <amount>`, but with the
+separator, the date format and the field order all varying; with the
+month occasionally mistyped; and with a question mark appended wherever
+the amount was not legible in the photograph.
+
+This is a repetitive, error-prone chore done by hand many times a month,
+and it has nothing to do with Hearth -- which is precisely why it is
+worth building. It is the capability that makes the agent obviously
+worth having in week one.
+
+**And the uncertain amounts never needed guessing, because the bank
+already emailed them.** A card-alert archetype carrying merchant, amount
+and date arrives within minutes of the transaction the receipt records.
+Match the two on date and approximate amount and the authoritative
+figure is free:
+
+> **The bank alert is the validation gate for the receipt OCR** -- the
+> same principle as a bill carrying its own checksum, applied to a
+> photograph. Every uncertain amount resolves itself.
+
+The pipeline:
+
+1. Detect -- image attachment, or a point-of-sale receipt archetype.
+2. OCR with Tesseract. **This is where OCR traffic actually is**: single
+   photographs, not forty-page documents, which is what makes it
+   tractable on this hardware. The earlier open question is answered --
+   receipts *are* photographed, so OCR is a real path rather than a rare
+   one.
+3. Extract merchant, date, amount, card digits.
+4. Reconcile against the card-alert archetype for the authoritative
+   amount.
+5. Compose the subject in one consistent format, with the right month.
+6. **Draft** the forward. Never send -- it is outbound, so it is
+   proposed only.
+7. File to the receipts label and propose the Hearth category.
+
+### The Hearth write path: an intake queue that is a Gmail label
+
+Hearth is deployed *execute as me, access only myself*, so nothing
+outside can POST to `/exec`. But the daily digest proves what it can
+already do: **Apps Script runs as its owner, on a time trigger, with
+GmailApp and DriveApp in hand.**
+
+So invert the direction. The agent does not push into Hearth; **Hearth
+pulls.**
+
+- The agent writes each proposal as a message under a dedicated label,
+  body as versioned JSON.
+- Hearth's existing trigger drains that label on its own schedule,
+  validates under its own rules, and writes canonical state.
+- Processed proposals are relabelled; rejected ones are annotated and
+  left for the digest.
+
+This needs **no new endpoint, no OAuth client, no web-app redeployment
+and no public surface**. Hearth remains the sole writer of its own
+state, the agent stays outside the trust boundary, and the whole
+integration is a label plus a schema. If Hearth's state turns out to be
+a Sheet, the same shape works as an intake tab.
+
+### What the proposals should be, per Hearth's own words
+
+The digest's closing section -- *"Housekeeping: the things that fail
+quietly"* -- is effectively a specification. It reports a stale bank
+feed, documents needing a look, a sizeable reconciliation queue, and a
+large sum spread across transactions carrying no category yet.
+
+Those map one-to-one onto what email evidence can supply:
+
+| Hearth's backlog | The email evidence that settles it |
+|---|---|
+| Transactions with no category | Card-alert archetype -- merchant, amount, date |
+| Reconciliation queue | Alert plus receipt, matched; pre-tick the confident ones |
+| Paperwork needing a look | Statement archetypes -- register the document, extract due date and balance |
+| Stale bank feed | Detect the absence: no alerts for N days is itself a signal |
+
+**The agent's highest-value contribution to Hearth is categorisation and
+pre-ticked reconciliation**, not new rows. Hearth already knows what it
+owns; it does not know what each line *was*. Email does.
+
+Note the last row. A feed that stops is invisible to anything watching
+for errors, because silence raises none. An archetype whose expected
+cadence lapses is a first-class alert -- **the agent should notice what
+stops arriving**, not only what arrives.
+
+---
+
+## Build order
+
+Each phase ships something useful by itself, and every phase that acts
+runs in shadow first.
+
+| | Phase | Ships | Effort |
+|---|---|---|---|
+| 0 | **The box.** NixOS, watchdog, no-sleep, zram, mesh access, one heavy slot. | A machine that comes back | An evening |
+| 1 | **Ingest and queue.** History cursor, SQLite, structural fingerprinting. No model, no actions. | Measurements: real volume, archetype count, skeleton stability | A weekend |
+| 2 | **Archetype registry.** Cluster 90 days. Claude names each cluster once, batched. | The inventory, and the cadence table | Hours of quota |
+| 3 | **Label audit.** Claude audits the existing label tree, repairs it, emits the training set. | A clean, trustworthy corpus | One batch |
+| 4 | **The student.** Model2Vec, logistic regression, confidence threshold. **Shadow only** -- classify, act on nothing, report disagreements nightly. | Measured accuracy before any risk | A weekend |
+| 5 | **Free actions.** Labelling and filing, once shadow has agreed for a week. | An inbox that sorts itself | Small |
+| 6 | **Receipts.** OCR, alert matching, drafted forwards. | The chore disappears | A weekend |
+| 7 | **Hearth intake.** Proposal label, JSON schema, Apps Script drain. | Categorisation and reconciliation | Needs Hearth-side work |
+| 8 | **Governor and sweep.** Metering, reserve, priority admission, nightly review. | It looks after itself | Small |
+
+**Phase 1 before anything clever.** Every number in this document is an
+estimate; a week of ingest replaces all of them with measurements, and
+costs no quota at all.
+
+---
+
+## Operations
+
+**The one number worth watching: the age of the oldest unprocessed
+message.** Not uptime, not throughput. It captures model outages, quota
+exhaustion, a wedged extractor and a stalled ingest in a single value,
+and it is the only thing worth waking anyone for.
+
+**Weekly, from the nightly sweep's own output:**
+
+- Escalation rate -- it should *decline*. Flat means the student has
+  stopped learning; rising means archetype drift.
+- Archetype coverage -- the share of mail matching a known skeleton.
+  Falling coverage predicts a rising bill before the quota notices.
+- Validation failure rate per archetype -- pinpoints which extractor is
+  rotting.
+- Quota burn against the reserve.
+
+**The things that fail quietly** -- borrowing Hearth's own excellent
+framing, because none of these raises an error:
+
+- An archetype that stops arriving (a cancelled alert, a changed sender
+  address). Cadence monitoring is the only thing that sees it.
+- OCR degrading gradually rather than failing.
+- The student drifting as the mailbox changes around it.
+- Quota creep from a sender that quietly grew.
+
+**Kill switch.** One systemd unit to stop. The queue persists, ingest
+resumes from its cursor, nothing is lost. If in doubt, stop it -- the
+design's whole premise is that pausing costs latency and nothing else.
+
+---
+
 ## The stack, and what "closed environment" really buys
 
 Everything below is free and open source and runs on the box. Licences
@@ -852,28 +1033,19 @@ same design against any mailbox.
 
 ## Still open
 
-1. **Hearth's write path.** The app is deployed *execute as me, access
-   only myself*, so the agent cannot simply POST to `/exec`. The
-   cleanest shape is probably an **intake queue** -- the agent appends
-   proposed rows, Hearth's own script drains them under its own rules --
-   so the ledger keeps a single writer and the agent stays outside the
-   trust boundary. Needs Hearth's internals to decide.
-2. **Autonomy.** Assumed for now: **drafts, never sends.** Labels, filing
-   and Hearth *proposals* are autonomous; anything leaving the house or
-   changing the ledger waits for a human. Easy to loosen later, very
-   hard to walk back.
-3. **Volume and accounts.** Every number in layer 1 is arithmetic over an
-   assumed 200/day across one mailbox. Real volume, and whether this is
-   one Gmail account or several, changes the escalation budget directly.
-4. **The archetype inventory.** Begun -- see the survey above -- and
-   still the critical path. The heavy senders are identified and their
-   archetypes sketched; what remains is skeleton-hashing a few months of
-   history to measure how stable each one is and how often it drifts.
-5. **The action vocabulary.** Given an archetype, what may the agent
-   *do*? The table in the archetype section sketches it for Citi --
-   ledger row, reconcile, file, escalate -- but the real list, and which
-   entries are irreversible, is a decision rather than a discovery.
-6. **Scanned vs native PDFs.** If recurring senders email real PDFs,
-   templates plus Docling cover nearly everything and OCR never runs. If
-   receipts get photographed, Tesseract gets real traffic on a Haswell
-   ULV and the extraction budget needs redoing.
+Everything blocking is now decided or measured. What remains needs Jeff,
+or needs Phase 1's numbers.
+
+1. **Is the receipt-forwarding convention right?** The design infers the
+   target format from existing sent mail. Confirm the subject
+   convention and the destination, and whether drafts or a review queue
+   suits you better.
+2. **Hearth's internals.** The intake-label design assumes a trigger can
+   be added and that proposals can be validated Hearth-side. Plausible
+   from the digest alone, unconfirmed.
+3. **The concrete archetype inventory.** Held out of this repository --
+   it is **public**, verified 21 Sep 2026 -- and delivered separately.
+   Fold it in only if the repo becomes private.
+4. **Phase 1's measurements.** Archetype count, skeleton stability and
+   drift rate. Everything sized off estimates gets resized once a week
+   of real ingest exists.
