@@ -141,6 +141,46 @@ Btrfs on a decent SSD, with snapshots of the agent's state directory.
 NixOS generations roll back *code*; they do nothing for the queue
 database, and the queue is the part you cannot recreate.
 
+### 8 GB, and it cannot be expanded
+
+**Measured constraint: 8 GB, no upgrade path.** This is the tightest
+budget in the design and it decides more than any other number here. It
+is not a reason to change machines; it is a reason to be explicit about
+who is allowed to be resident at once.
+
+| | resident |
+|---|---|
+| NixOS headless, sshd, mesh client | ~0.5 GB |
+| Worker, SQLite, page cache | ~0.3 GB |
+| Model2Vec + scikit-learn (layer 3) | ~0.2 GB |
+| **Exactly one heavy stage at a time** | **up to ~3 GB** |
+
+That last row is the whole discipline. The heavy stages are Claude Code
+(Node, ~0.5-1.5 GB while running) and Docling (~2.3 GB standard,
+~2.8 GB with Tesseract). Either fits. **Both at once does not.**
+
+- **One heavy slot, enforced.** A single-slot semaphore in the worker,
+  so extraction and a `claude -p` invocation can never overlap. This
+  stops being hygiene and becomes architecture at 8 GB.
+- **Short-lived subprocesses, never daemons.** Docling holds ~1.5 GB per
+  converter instance for as long as it lives. Spawn per document, exit,
+  return the memory. Same for Claude Code -- `-p` runs and exits, and
+  nothing is left resident between batches.
+- **`MemoryMax=` on every unit.** An extraction killed for exceeding its
+  cap is a queue row to retry. An extraction that takes the whole
+  machine down is a dead mailbox until someone notices. Cap it and
+  choose which of those you get.
+- **zram, not disk swap.** Compressed swap in RAM
+  (`zramSwap.enable = true`) buys real headroom on 8 GB with no SSD
+  wear. A small disk swapfile at low swappiness behind it, as a
+  backstop for the rare spike.
+- **earlyoom or systemd-oomd.** The kernel OOM killer picks badly and
+  late. Choose the victim yourself, before the box goes unresponsive.
+- **Never build on the box.** `nixos-rebuild` is memory-hungry.
+  Build on your laptop and push the closure with
+  `nixos-rebuild --target-host`. The T440 only ever receives a finished
+  system, which suits both the RAM and the rollback story.
+
 ### Getting in, from anywhere, forever
 
 **Tailscale, on a Headscale control server.** Not port-forwarding, not
@@ -319,63 +359,85 @@ cells essentially perfectly.
 Tables are not an edge case here. Tables are the bill. A parser that
 scrambles a table does not produce a vaguer ledger entry, it produces a
 **confidently wrong number**, silently, in the household accounts. That
-is the one failure mode worth spending both tokens and seconds to
-avoid.
+is the one failure mode the whole document path exists to prevent.
+
+**Keep that diagnosis; the prescription below is not the obvious one.**
+An earlier draft concluded "so make Docling the default," and 8 GB
+rules that out. The tiering that follows reaches the same accuracy by a
+different route -- a cheap deterministic parser per vendor, with an
+arithmetic check that catches it when it is wrong -- and costs a
+fraction of the memory and the quota.
 
 **Treat those benchmark numbers as a reason to measure, not as truth.**
-They come from specific corpora that are not your post. Keep ~20 real
+They come from specific corpora that are not your post, and the tier-0
+path below is not in any of them. Keep ~20 real
 bills from your actual recurring senders as a golden set with the
 correct figures written out by hand, and run any parser change against
 it. Twenty documents is an afternoon and it is the only evidence that
 transfers to this mailbox.
 
-### The tiering
+### The tiering, rebuilt for 8 GB
 
-Route by document class. One parser for everything is the mistake.
+The previous draft made Docling the default for anything financial. **At
+8 GB that is wrong**, and the fix turns out to be better on every axis,
+not merely cheaper.
 
-**Tier 0 -- learned templates. The win that dwarfs the parser choice.**
-A household receives the same bills from the same ~20 senders every
-month, in the same layout. Parse a given sender's bill correctly once,
-store a template keyed on `(sender, layout fingerprint)`, and every
-subsequent month extracts by deterministic code: **zero tokens, zero
-latency, exact fidelity, and no model in the loop to have an opinion.**
-Only a template *miss* -- new sender, changed layout, failed
-validation -- escalates. After a few months this should absorb the large
-majority of recurring financial mail, and the model's job narrows to
-what it is actually good at: the new and the strange.
+**Tier 0 -- a per-vendor extractor that Claude writes once.**
+A household bills from a stable supplier base: the same ~20 senders,
+the same layouts, every month. Published comparisons land exactly on
+this case -- teams maintaining *per-vendor configurations for a stable
+supplier base* get the **highest accuracy of any open-source coordinate
+tool** out of pdfplumber, which is pure Python over pdfminer with **no
+ML and no model weights at all**.
 
-This is the highest-leverage idea in the whole design and it is easy to
-skip, because on day one it does nothing at all.
+The usual objection is that per-vendor rules are laborious to write and
+break on layout drift. That objection dissolves here, because you have
+Claude on the box:
 
-**Tier 1 -- MarkItDown.** DOCX, PPTX, XLSX, CSV, HTML, and PDFs with a
-clean text layer and no tables that matter. Fast, cheap, plenty good.
+> **Claude's job is not to read the document. It is to write the
+> extractor for that vendor, once.**
 
-**Tier 2 -- Docling.** Anything financial, anything table-heavy,
-anything where a wrong number reaches Hearth. Slow, and worth it.
+Fifty lines of pdfplumber, authored in a single invocation, then run for
+free on every future bill from that sender. Claude returns only when the
+validation gate below trips. This is the same distillation idea as layer
+3 -- scarce judgement spent on teaching, not on labour -- applied to
+documents instead of to classification, and it is near-zero on both RAM
+and tokens.
 
-**Tier 3 -- the model.** Scans, photographs of receipts, layouts that
-defeat both parsers. Send the pages as a document block and pay the
-1,500-3,000. Rare by construction, which is what makes it affordable.
+**Tier 1 -- MarkItDown.** DOCX, PPTX, XLSX, CSV, HTML, plain text-layer
+PDFs. ~100 MB, fast, fine.
 
-### Docling on a Haswell ULV, and why it does not matter
+**Tier 2 -- Docling, as the exception.** New vendors, unknown layouts,
+and tables the cheap path cannot validate. Standard pipeline only
+(~2.3 GB), in the single heavy slot, as a subprocess that exits.
+**If OCR is needed, Tesseract (~2.8 GB) -- never EasyOCR (~4 GB), and
+never the code/formula model (~15.5 GB), which does not fit and never
+will.** Its output is not just an answer; it is the worked example
+Claude uses to write that vendor's tier-0 extractor, so each Docling run
+should be the last one for that sender.
 
-Two minutes per hundred pages is a figure from a modern CPU. On the
-T440 -- dual-core ULV, no GPU -- expect meaningfully worse, and check
-the RAM headroom before committing, since the layout and table models
-are not free. OCR on scanned documents will be slower again.
+**Tier 3 -- Claude reads the pages.** Scans and layouts that defeat
+everything else. On a Pro quota this is genuinely expensive now, which
+is exactly why it sits at the bottom.
 
-**None of which matters, because of layer 1.** Nothing is waiting. The
-queue already decoupled arrival from processing, so a ninety-second
-Docling run on a bank statement blocks precisely nothing -- it is one
-row that reaches the model a minute and a half later than it might
-have. This is the second dividend of building the queue first: it does
-not only absorb model outages, it makes extraction latency free, which
-is what lets the accurate-but-slow parser be the default for the
-documents that matter.
+### The validation gate, which is what makes the cheap path safe
 
-Keeping extraction local is also the privacy answer. Bank statements
-and medical bills get turned into text on your own machine; only the
-extracted text crosses the network.
+Trying the cheap parser first is only safe if you can tell when it was
+wrong. For financial documents you can, for free:
+
+> **A bill carries its own checksum.** Line items sum to a stated total.
+> There is a date. The amounts parse as currency. The account number
+> matches the sender on file.
+
+Run that arithmetic after every tier-0 and tier-1 extraction. It costs
+nothing, it needs no model, and it catches the failure that actually
+matters -- a mangled table producing a confidently wrong number. On a
+failed check, escalate a tier and, if Docling resolves it, have Claude
+repair the vendor's extractor.
+
+This is the single most valuable check in the document path. It is also
+the answer to layout drift: drift shows up as a sum that no longer
+balances, not as a silent wrong entry in the ledger.
 
 ### The rules that keep it cheap
 
@@ -427,18 +489,23 @@ On this hardware that is close to free:
   static token embeddings: **~50x smaller and up to ~500x faster**, at
   roughly **93%** of `all-MiniLM-L6-v2`'s quality (~52.1 vs 56.3 MTEB).
   Distillation itself runs in about **30 seconds on CPU**.
-- Or **`all-MiniLM-L6-v2`** directly -- under 10ms per email on CPU,
-  MTEB 56.3 -- if you want the accuracy and can spare the milliseconds.
+- **8 GB settles this choice.** Model2Vec infers from static
+  embeddings with numpy alone. `all-MiniLM-L6-v2` via
+  sentence-transformers pulls in PyTorch, which costs the better part of
+  a gigabyte resident before it embeds anything -- a gigabyte that has
+  to come out of the single heavy slot. Take the ~7% quality difference
+  and keep the RAM.
 - Then plain **logistic regression** over the embeddings. Not a
   neural net. Boring, fast, interpretable, and it tells you its
   confidence, which is the part that matters.
 
-**Note what this avoids.** No local *generative* LLM. Nothing to quantise,
-no tokens/sec to agonise over on a Haswell ULV, no 4GB of weights
-competing with Docling for the 12GB ceiling. Embeddings plus a linear
-model is microseconds per email and tens of megabytes resident. The
-T440 is comfortably the right machine for this, which it would not be
-for a local 7B.
+**Note what this avoids.** No local *generative* LLM. Nothing to
+quantise, no tokens/sec to agonise over on a Haswell ULV, and no weights
+competing with Docling for an 8 GB ceiling that has no upgrade path.
+Embeddings plus a linear model is microseconds per email and **tens of
+megabytes** resident -- small enough to stay loaded permanently rather
+than fighting for the heavy slot. A local 7B was never viable here; this
+is why it does not need to be.
 
 **Phase 3 -- steady state.** The student classifies everything. Only
 low-confidence cases escalate, batched, to Claude.
@@ -512,13 +579,18 @@ noted because a couple of them matter.
 | Mail parsing | Python `email` stdlib | PSF |
 | Quoted-chain / signature stripping | talon, email-reply-parser | Apache-2.0, MIT |
 | HTML and Office to Markdown | MarkItDown | MIT |
-| Table-faithful documents | Docling | MIT |
-| PDF text layer | pdfplumber / pdfminer.six | MIT |
-| OCR | Tesseract or RapidOCR | Apache-2.0 |
+| **Per-vendor extraction (tier 0)** | **pdfplumber / pdfminer.six** | **MIT** |
+| Hard layouts only (tier 2, ~2.3 GB) | Docling | MIT |
+| OCR, when unavoidable (~2.8 GB) | Tesseract | Apache-2.0 |
 | Embeddings | Model2Vec / sentence-transformers | MIT / Apache-2.0 |
 | Classifier | scikit-learn | BSD-3 |
 
-**Two traps worth naming now.**
+**Note the order.** pdfplumber does the routine work because it has no
+model weights and no PyTorch; Docling is the escalation, not the
+default. On 8 GB that ordering is forced, and per the comparisons it is
+also the more accurate one for a stable supplier base.
+
+**Three traps worth naming now.**
 
 **PyMuPDF is AGPL-3.0.** It is the fastest PDF library and the obvious
 reach, and its licence is viral in a way the rest of this list is not.
@@ -531,6 +603,13 @@ recommends Tailscale, and under the old assumptions that was fine. Under
 the middle of your remote access. **Headscale** (BSD-3) is the
 self-hosted control server that closes that gap and speaks to the stock
 clients. If remote access must survive a vendor, run Headscale.
+
+**Docling's optional models do not all fit.** The standard pipeline is
+~2.3 GB and Tesseract OCR ~2.8 GB, both workable in the single heavy
+slot. EasyOCR at ~4 GB is not worth the risk, and the code/formula model
+at ~15.5 GB is roughly twice the machine. Pin the pipeline
+configuration explicitly rather than accepting whatever a future default
+enables.
 
 **And the honest boundary:** this environment is not closed. Claude is a
 network service and so is Gmail. What the FOSS constraint actually buys
